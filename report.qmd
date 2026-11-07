@@ -23,8 +23,10 @@ execute:
 ## How this project works
 Every search result this report uses is stored in the folder `data/`. The
 **first** render sends the searches to OpenAlex, Crossref, EconBiz and EconStor
-and saves each answer there; **every later render reads the saved answers** and
-sends no request at all. That makes the report reproducible: you get exactly the
+and saves each answer there. This will already been done once you look at this 
+file. **Every later render reads the saved answers** and
+sends no request at all -- and that includes *you* first run. 
+That makes the report reproducible: you get exactly the
 numbers in this report, even though the databases keep changing — and you need
 no API key to reproduce it.
 
@@ -39,16 +41,20 @@ key (see the setup below) and overwrites the saved answers.
 #| label: setup
 here::i_am("report.qmd")
 
-# Searches with umlauts (Arbeitszeitverkürzung) need a UTF-8 session: in the
+# Searches with Umlauten (Arbeitszeitverkürzung) need a UTF-8 session: in the
 # "C" locale, which R gets when started from some terminals, the umlaut is
 # sent as the text "<c3><bc>" and silently matches nothing. RStudio and
 # Windows use UTF-8 by default.
 if (!l10n_info()$`UTF-8`) invisible(Sys.setlocale("LC_CTYPE", "en_US.UTF-8"))
 
 library(here)
-library(data.table)
-library(ggplot2)
 library(openalexR)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(purrr)
+library(stringr)
+library(ggplot2)
 library(httr2)
 library(xml2)
 
@@ -63,41 +69,46 @@ theme_set(theme_minimal())
 ```
 
 The helper `cached()` is what makes the report reproducible. It returns the
-saved answer from `data/` if there is one; only otherwise does it run the
+saved answer from `data/` if there is one. Only if there isn't does it run the
 search, save the answer, and note the date in `data/retrieval_log.csv`.
 
 ```{r}
 #| label: cached
 cached <- function(name, expr, needs_key = FALSE) {
-  file <- here("data", paste0(name, ".rds"))
+  file <- here("data", str_c(name, ".rds"))
   if (file.exists(file) && !isTRUE(params$refresh)) {
-    return(readRDS(file))
+    return(read_rds(file))
   }
   if (needs_key && !nzchar(Sys.getenv("OPENALEX_KEY"))) {
     stop("data/", name, ".rds is missing and no OPENALEX_KEY is set. ",
          "Add your OpenAlex key to ~/.Renviron and restart R.", call. = FALSE)
   }
   value <- expr # the search runs only here (lazy evaluation)
-  saveRDS(value, file)
+  write_rds(value, file)
 
   log_file <- here("data", "retrieval_log.csv")
-  log <- if (file.exists(log_file)) fread(log_file) else data.table()
-  entry <- data.table(object = name,
-                      retrieved = format(Sys.time(), "%Y-%m-%d %H:%M %Z"),
-                      rows = NROW(value))
-  log <- rbind(log[if (nrow(log)) object != name else TRUE], entry)
-  fwrite(log, log_file)
+  log <- if (file.exists(log_file)) {
+    read_csv(log_file, col_types = cols(.default = col_character()))
+  } else {
+    tibble(object = character(), retrieved = character(), rows = character())
+  }
+  log |>
+    filter(object != name) |>
+    bind_rows(tibble(object = name,
+                     retrieved = format(Sys.time(), "%Y-%m-%d %H:%M %Z"),
+                     rows = as.character(NROW(value)))) |>
+    write_csv(log_file)
   value
 }
 
-clean_doi <- function(x) tolower(sub("^https://doi.org/", "", x))
-short_id  <- function(x) sub(".*/", "", x)
+clean_doi <- function(x) str_to_lower(str_remove(x, "^https://doi.org/"))
+short_id  <- function(x) str_remove(x, ".*/")
 ```
 
 ```{r}
 #| label: retrieval-dates
 log_file <- here("data", "retrieval_log.csv")
-if (file.exists(log_file)) fread(log_file)
+if (file.exists(log_file)) read_csv(log_file, col_types = cols(.default = col_character()))
 ```
 
 The table shows when each saved answer was retrieved. These are the dates to
@@ -106,7 +117,7 @@ report for the searches.
 # Step 3: the search in OpenAlex
 
 The string is the one from the tutorial, built from its concept table. It is
-written exactly as in the web interface; the API uses commas to separate
+written exactly as in the web interface. Note that the API uses commas to separate
 filters, so the string contains none.
 
 ```{r}
@@ -117,7 +128,7 @@ query <- '("four-day week" OR "four day week" OR "4-day week"
   OR "shorter working week" OR "shorter workweek")
   AND (productivity OR productive OR "well-being" OR wellbeing OR satisfaction
   OR burnout OR stress OR absenteeism OR turnover OR performance)'
-query <- gsub("\\s+", " ", query) # one line, single spaces
+query <- str_squish(query) # one line, single spaces
 ```
 
 First only the number of hits — cheap, and enough to compare string versions:
@@ -134,7 +145,7 @@ n_hits <- cached("openalex_count", needs_key = TRUE, oa_fetch(
 n_hits$count
 ```
 
-How OpenAlex read the string — note the `stemmed` before each term:
+See how OpenAlex reads the string and note the `stemmed` before each term:
 stemming is switched on automatically.
 
 ```{r}
@@ -146,13 +157,12 @@ Then the records themselves:
 
 ```{r}
 #| label: fetch
-works <- cached("openalex_works", needs_key = TRUE, as.data.table(oa_fetch(
+works <- cached("openalex_works", needs_key = TRUE, oa_fetch(
   entity = "works",
   title_and_abstract.search = query,
   type = c("article", "review"),
   language = "en"
-)))
-works <- copy(works)
+))
 nrow(works)
 ```
 
@@ -164,7 +174,7 @@ records that a title-and-abstract search can only find through their titles.
 
 ```{r}
 #| label: test-set
-test_set <- data.table(
+test_set <- tibble(
   paper = c("Lepinteur, Labour Economics",
             "Mullens & Laurijssen, BMC Public Health",
             "Raposo & van Ours, Economics Letters",
@@ -176,12 +186,16 @@ test_set <- data.table(
 )
 
 # The test-set records themselves: do they have an abstract in OpenAlex?
-test_records <- cached("openalex_test_set", needs_key = TRUE, as.data.table(
-  oa_fetch(entity = "works", doi = test_set$doi)
-))
-test_set[, found_by_string := doi %in% clean_doi(works$doi)]
-test_set[, has_abstract := doi %in%
-           clean_doi(test_records[!is.na(abstract) & abstract != "", doi])]
+test_records <- cached("openalex_test_set", needs_key = TRUE,
+                       oa_fetch(entity = "works", doi = test_set$doi))
+with_abstract <- test_records |>
+  filter(!is.na(abstract), abstract != "") |>
+  pull(doi) |>
+  clean_doi()
+
+test_set <- test_set |>
+  mutate(found_by_string = doi %in% clean_doi(works$doi),
+         has_abstract    = doi %in% with_abstract)
 test_set
 ```
 
@@ -195,22 +209,27 @@ How many of the hits have no abstract — and where are they concentrated?
 
 ```{r}
 #| label: abstract-gap
-works[, no_abstract := is.na(abstract) | abstract == ""]
-works[, .(records = .N, without_abstract = sum(no_abstract),
-          share = round(mean(no_abstract), 2))]
+works <- works |>
+  mutate(no_abstract = is.na(abstract) | abstract == "")
 
-head(
-  works[, .(records = .N, share_no_abstract = round(mean(no_abstract), 2)),
-        by = host_organization_name][order(-records)],
-  10
-)
+works |>
+  summarise(records = n(), without_abstract = sum(no_abstract),
+            share = round(mean(no_abstract), 2))
+
+works |>
+  group_by(host_organization_name) |>
+  summarise(records = n(), share_no_abstract = round(mean(no_abstract), 2)) |>
+  arrange(desc(records)) |>
+  head(10)
 ```
 
 ```{r}
 #| label: fig-abstract-gap
 #| fig-cap: "Share of hits without abstract, by publication year."
-ggplot(works[, .(share = mean(no_abstract)), by = publication_year],
-       aes(x = publication_year, y = share)) +
+works |>
+  group_by(publication_year) |>
+  summarise(share = mean(no_abstract)) |>
+  ggplot(aes(x = publication_year, y = share)) +
   geom_col() +
   labs(x = "Publication year", y = "Share of records without abstract")
 ```
@@ -224,14 +243,16 @@ These numbers belong in the limitations paragraph.
 ```{r}
 #| label: fig-years
 #| fig-cap: "Hits per publication year."
-ggplot(works[, .N, by = publication_year], aes(x = publication_year, y = N)) +
+works |>
+  count(publication_year) |>
+  ggplot(aes(x = publication_year, y = n)) +
   geom_col() +
   labs(x = "Publication year", y = "Records")
 ```
 
 ```{r}
 #| label: journals
-head(works[, .N, by = source_display_name][order(-N)], 15)
+works |> count(source_display_name, sort = TRUE) |> head(15)
 ```
 
 If almost everything comes from a handful of journals of one field, the string
@@ -240,7 +261,7 @@ may be speaking only one community's language.
 ## Two strings, two vocabularies
 
 Terminology bias becomes visible when strings built from different
-vocabularies are compared. String A uses only the "four-day week" terms; the
+vocabularies are compared. String A uses only the "four-day week" terms. The
 full string adds "working time reduction" and related terms.
 
 ```{r}
@@ -248,18 +269,21 @@ full string adds "working time reduction" and related terms.
 string_a <- '("four-day week" OR "four day week" OR "4-day week")
   AND (productivity OR productive OR "well-being" OR wellbeing OR satisfaction
   OR burnout OR stress OR absenteeism OR turnover OR performance)'
-string_a <- gsub("\\s+", " ", string_a)
 
-works_a <- cached("openalex_string_a", needs_key = TRUE, as.data.table(oa_fetch(
+works_a <- cached("openalex_string_a", needs_key = TRUE, oa_fetch(
   entity = "works",
-  title_and_abstract.search = string_a,
+  title_and_abstract.search = str_squish(string_a),
   type = c("article", "review"),
   language = "en"
-)))
+))
 
 only_full <- setdiff(works$id, works_a$id)
 c(string_a = nrow(works_a), full_string = nrow(works), only_full = length(only_full))
-head(works[id %in% only_full, .(publication_year, source_display_name, title)], 15)
+
+works |>
+  filter(id %in% only_full) |>
+  select(publication_year, source_display_name, title) |>
+  head(15)
 ```
 
 # Step 5: the screening sheet
@@ -269,54 +293,64 @@ to `output/` and rebuilt on every render.
 
 ```{r}
 #| label: screening-sheet
-screening <- works[, .(
-  id, doi, publication_year, title, source_display_name, abstract,
-  abstract_source = fifelse(no_abstract, "", "OpenAlex")
-)]
+screening <- works |>
+  transmute(id, doi, publication_year, title, source_display_name, abstract,
+            abstract_source = if_else(no_abstract, "", "OpenAlex"))
 ```
 
 ## Fill in abstracts from Crossref
 
 Some publishers deposit abstracts with Crossref, the DOI registration agency.
-Elsevier does not, so its abstracts still have to be copied from the
-publisher page by hand.
+Elsevier and Springer Nature do not, so their abstracts still have to be
+copied from the publisher page by hand.
 
 ```{r}
 #| label: crossref
 crossref_abstract <- function(doi) {
   res <- tryCatch(
-    request(paste0("https://api.crossref.org/works/", doi)) |>
+    request(str_c("https://api.crossref.org/works/", doi)) |>
       req_perform() |>
       resp_body_json(),
-    error = function(e) NULL) # no record or no access: NULL
+    error = function(e) NULL # no record or no access: NULL
+  )
   ab <- res$message$abstract
-  if (is.null(ab)) NA_character_ else trimws(gsub("<[^>]+>", " ", ab))
+  if (is.null(ab)) NA_character_ else str_squish(str_remove_all(ab, "<[^>]+>"))
 }
 
-missing_dois <- screening[abstract_source == "" & !is.na(doi), clean_doi(doi)]
-crossref <- cached("crossref_abstracts", data.table(
+missing_dois <- screening |>
+  filter(abstract_source == "", !is.na(doi)) |>
+  pull(doi) |>
+  clean_doi()
+
+crossref <- cached("crossref_abstracts", tibble(
   doi = missing_dois,
-  abstract = vapply(missing_dois, function(d) {
+  crossref = map_chr(missing_dois, \(d) {
     Sys.sleep(0.2) # be polite to the API
     crossref_abstract(d)
-  }, character(1))
+  })
 ))
 
-screening[, doi_clean := clean_doi(doi)]
-screening[crossref[!is.na(abstract)], on = .(doi_clean = doi),
-          `:=`(abstract = i.abstract, abstract_source = "Crossref")]
-screening[, doi_clean := NULL]
-screening[, .N, by = .(abstract_source = fifelse(abstract_source == "",
-                                                 "(still missing)", abstract_source))]
+screening <- screening |>
+  mutate(doi_clean = clean_doi(doi)) |>
+  left_join(crossref, by = c("doi_clean" = "doi")) |>
+  mutate(
+    abstract_source = if_else(!is.na(crossref), "Crossref", abstract_source),
+    abstract = coalesce(crossref, abstract)
+  ) |>
+  select(-doi_clean, -crossref)
+
+screening |>
+  count(abstract_source = if_else(abstract_source == "", "(still missing)",
+                                  abstract_source))
 ```
 
 ```{r}
 #| label: write-sheet
-sheet <- copy(screening)
-sheet[, `:=`(decision_ta = "", reason_ta = "", decision_ft = "",
-             reason_ft = "", notes = "")]
-setorder(sheet, abstract_source) # records without abstract first
-fwrite(sheet, here("output", "screening_sheet.csv"), bom = TRUE)
+screening |>
+  mutate(decision_ta = "", reason_ta = "", decision_ft = "",
+         reason_ft = "", notes = "") |>
+  arrange(abstract_source) |> # records without abstract first
+  write_excel_csv(here("output", "screening_sheet.csv"))
 ```
 
 The decisions are made by hand: copy the sheet, screen, and save the decisions
@@ -331,13 +365,14 @@ that fit your question best, ideally one from a closed-access journal.
 
 ```{r}
 #| label: snowball
-seeds <- short_id(works[order(-cited_by_count)][1:2, id])
-works[short_id(id) %in% seeds, .(publication_year, title, cited_by_count)]
+seed_works <- works |> slice_max(cited_by_count, n = 2, with_ties = FALSE)
+seed_works |> select(publication_year, title, cited_by_count)
+seeds <- short_id(seed_works$id)
 
 snow <- cached("openalex_snowball", needs_key = TRUE,
                oa_snowball(identifier = seeds))
-candidates <- as.data.table(snow$nodes)[oa_input == FALSE]
-new <- candidates[!short_id(id) %in% short_id(works$id)]
+candidates <- snow$nodes |> filter(!oa_input)
+new <- candidates |> filter(!short_id(id) %in% short_id(works$id))
 c(candidates = nrow(candidates), new = nrow(new))
 ```
 
@@ -346,8 +381,9 @@ the flow diagram. Does snowballing find test-set papers that the string missed?
 
 ```{r}
 #| label: snowball-test-set
-test_set[, found_by_snowball := doi %in% clean_doi(candidates$doi)]
-test_set[, .(paper, found_by_string, found_by_snowball)]
+test_set |>
+  mutate(found_by_snowball = doi %in% clean_doi(candidates$doi)) |>
+  select(paper, found_by_string, found_by_snowball)
 ```
 
 # Digression: a second database — EconBiz
@@ -359,15 +395,16 @@ depending on the source.
 ```{r}
 #| label: econbiz-query
 in_fields <- function(terms, fields = c("title", "abstract", "description")) {
-  paste0("(", paste0(fields, ":(", terms, ")", collapse = " OR "), ")")
+  str_c("(", str_c(fields, ":(", terms, ")", collapse = " OR "), ")")
 }
 work_terms <- '"four-day week" OR "4-day week" OR "four day week"
   OR "working time reduction" OR "work time reduction"
   OR "reduced working hours" OR "shorter working week"'
 outcome_terms <- 'productiv* OR well-being OR wellbeing OR satisfaction
   OR burnout OR stress OR absentee* OR turnover OR performance'
-eb_query <- gsub("\\s+", " ",
-                 paste(in_fields(work_terms), "AND", in_fields(outcome_terms)))
+eb_query <- str_squish(
+  str_c(in_fields(work_terms), " AND ", in_fields(outcome_terms))
+)
 ```
 
 `from` counts from 1; a fixed sort order (`id asc`) makes the pages fit
@@ -390,25 +427,24 @@ econbiz_search <- function(q, page_size = 500) {
     hits <- c(hits, page)
   }
   first_or_na <- function(x) if (length(x)) as.character(x[[1]]) else NA_character_
-  rbindlist(lapply(hits, function(x) {
-    urls   <- unlist(x$identifier_url)
-    doi    <- grep("doi.org/", urls, value = TRUE)
-    handle <- regmatches(urls, regexpr("10419/[0-9]+", urls)) # EconStor
-    data.table(
+  map(hits, \(x) {
+    urls <- unlist(x$identifier_url)
+    tibble(
       id     = x$id,
       source = first_or_na(x$source),
       type   = first_or_na(x$type),
-      year   = as.integer(regmatches(first_or_na(x$date),
-                                     regexpr("[0-9]{4}", first_or_na(x$date)))[1]),
+      year   = as.integer(str_extract(first_or_na(x$date), "[0-9]{4}")),
       title  = first_or_na(x$title),
-      doi    = if (length(doi)) tolower(sub(".*doi.org/", "", doi[1])) else NA_character_,
-      handle = if (length(handle)) handle[1] else NA_character_
+      doi    = first_or_na(str_to_lower(str_remove(
+                 str_subset(urls, "doi.org/"), ".*doi.org/"))),
+      handle = first_or_na(str_extract(urls, "10419/[0-9]+") |> discard(is.na))
     )
-  }))
+  }) |>
+    list_rbind()
 }
 
-eb <- copy(cached("econbiz_en", econbiz_search(eb_query)))
-nrow(eb)
+eb_raw <- cached("econbiz_en", econbiz_search(eb_query))
+nrow(eb_raw)
 ```
 
 Drop events, then duplicates within EconBiz — first by DOI, then by title and
@@ -416,12 +452,13 @@ year:
 
 ```{r}
 #| label: econbiz-clean
-eb <- eb[type != "event"]
-eb[, title_key := tolower(gsub("[^[:alnum:]]", "", title))]
-eb <- eb[is.na(doi) | !duplicated(doi)]
-eb <- eb[!duplicated(eb, by = c("title_key", "year"))]
+eb <- eb_raw |>
+  filter(type != "event") |>
+  mutate(title_key = str_to_lower(str_remove_all(title, "[^[:alnum:]]"))) |>
+  filter(is.na(doi) | !duplicated(doi)) |>
+  distinct(title_key, year, .keep_all = TRUE)
 nrow(eb)
-eb[, .N, by = .(source, type)][order(-N)]
+eb |> count(source, type, sort = TRUE)
 ```
 
 Abstracts for records in EconStor, via its OAI-PMH interface:
@@ -431,23 +468,24 @@ Abstracts for records in EconStor, via its OAI-PMH interface:
 econstor_abstract <- function(handle) {
   oai <- request("https://www.econstor.eu/oai/request") |>
     req_url_query(verb = "GetRecord", metadataPrefix = "oai_dc",
-                  identifier = paste0("oai:econstor.eu:", handle)) |>
+                  identifier = str_c("oai:econstor.eu:", handle)) |>
     req_perform() |>
     resp_body_xml()
   abstract <- xml_find_first(oai, ".//dc:description", xml_ns(oai))
   if (inherits(abstract, "xml_missing")) NA_character_ else xml_text(abstract)
 }
 
-handles <- eb[!is.na(handle), unique(handle)]
-econstor <- cached("econstor_abstracts", data.table(
+handles <- eb |> filter(!is.na(handle)) |> distinct(handle) |> pull(handle)
+econstor <- cached("econstor_abstracts", tibble(
   handle = handles,
-  abstract = vapply(handles, function(h) {
+  abstract = map_chr(handles, \(h) {
     Sys.sleep(0.5) # be polite
     tryCatch(econstor_abstract(h), error = function(e) NA_character_)
-  }, character(1))
+  })
 ))
-eb[econstor, on = "handle", abstract := i.abstract]
-eb[, .(records = .N, with_abstract = sum(!is.na(abstract)))]
+
+eb <- eb |> left_join(econstor, by = "handle")
+eb |> summarise(records = n(), with_abstract = sum(!is.na(abstract)))
 ```
 
 Compared with OpenAlex, by DOI — records without a DOI are counted
@@ -455,13 +493,15 @@ separately:
 
 ```{r}
 #| label: econbiz-compare
-oa_dois <- setdiff(clean_doi(works$doi), NA)
-eb_dois <- setdiff(eb$doi, NA)
+oa_dois <- works |> filter(!is.na(doi)) |> pull(doi) |> clean_doi() |> unique()
+eb_dois <- eb |> filter(!is.na(doi)) |> pull(doi) |> unique()
+
 c(only_openalex       = length(setdiff(oa_dois, eb_dois)),
   only_econbiz        = length(setdiff(eb_dois, oa_dois)),
   both                = length(intersect(oa_dois, eb_dois)),
-  econbiz_without_doi = eb[is.na(doi), .N])
-eb[!doi %in% oa_dois, .N, by = .(type, source)][order(-N)]
+  econbiz_without_doi = sum(is.na(eb$doi)))
+
+eb |> filter(!doi %in% oa_dois) |> count(type, source, sort = TRUE)
 ```
 
 The German-language literature, which the English-only OpenAlex search
@@ -472,7 +512,7 @@ excludes:
 de_terms <- 'Arbeitszeitverkürzung OR "Vier-Tage-Woche" OR "4-Tage-Woche"'
 eb_de <- cached("econbiz_de", econbiz_search(in_fields(de_terms)))
 nrow(eb_de)
-head(eb_de[, .(year, title)], 10)
+eb_de |> select(year, title) |> head(10)
 ```
 
 # Step 8: the flow diagram
@@ -495,20 +535,20 @@ if (!has_decisions) {
 #| eval: !expr has_decisions
 library(PRISMA2020)
 
-screened <- fread(decisions_file, encoding = "UTF-8", colClasses = "character")
-screened <- screened[id %in% works$id]
+screened <- read_csv(decisions_file, col_types = cols(.default = col_character())) |>
+  filter(id %in% works$id)
 
-template <- read.csv(system.file("extdata", "PRISMA.csv", package = "PRISMA2020"))
+template <- read_csv(system.file("extdata", "PRISMA.csv", package = "PRISMA2020"),
+                     col_types = cols(.default = col_character()))
 set_n <- function(tab, field, value) {
   if (!field %in% tab$data) stop("Unknown box in PRISMA template: ", field)
-  tab$n[tab$data == field] <- value
-  tab
+  tab |> mutate(n = if_else(data == field, as.character(value), n))
 }
 
-sought        <- screened[decision_ta != "exclude", .N]
-not_retrieved <- screened[decision_ft == "not retrievable", .N]
-reasons       <- screened[decision_ft == "exclude", .N, by = reason_ft]
-included_db   <- screened[decision_ft == "include", .N]
+sought        <- screened |> filter(decision_ta != "exclude") |> nrow()
+not_retrieved <- screened |> filter(decision_ft == "not retrievable") |> nrow()
+reasons       <- screened |> filter(decision_ft == "exclude") |> count(reason_ft)
+included_db   <- screened |> filter(decision_ft == "include") |> nrow()
 
 # Snowballing: the new records are screened by hand as well; their decisions
 # go into data/snowball_decisions.csv (same columns)
@@ -516,32 +556,35 @@ snowball_found    <- nrow(new)
 snowball_included <- 0L
 snow_file <- here("data", "snowball_decisions.csv")
 if (file.exists(snow_file)) {
-  snow_dec <- fread(snow_file, encoding = "UTF-8", colClasses = "character")
-  snowball_included <- snow_dec[decision_ft == "include", .N]
+  snowball_included <- read_csv(snow_file, col_types = cols(.default = col_character())) |>
+    filter(decision_ft == "include") |>
+    nrow()
 }
 
 counts <- list(
   database_results           = nrow(works),
   duplicates                 = 0,
   records_screened           = nrow(screened),
-  records_excluded           = screened[decision_ta == "exclude", .N],
+  records_excluded           = screened |> filter(decision_ta == "exclude") |> nrow(),
   dbr_sought_reports         = sought,
   dbr_notretrieved_reports   = not_retrieved,
   dbr_assessed               = sought - not_retrieved,
-  dbr_excluded               = paste0(reasons$reason_ft, ", ", reasons$N,
-                                      collapse = "; "),
+  dbr_excluded               = str_c(reasons$reason_ft, ", ", reasons$n,
+                                     collapse = "; "),
   citations_results          = snowball_found,
   other_sought_reports       = snowball_found,
   other_notretrieved_reports = 0,
   other_assessed             = snowball_found,
-  other_excluded             = paste0("Not eligible, ",
-                                      snowball_found - snowball_included),
+  other_excluded             = str_c("Not eligible, ",
+                                     snowball_found - snowball_included),
   new_studies                = included_db + snowball_included,
   new_reports                = included_db + snowball_included
 )
-for (box in names(counts)) template <- set_n(template, box, counts[[box]])
+for (box in names(counts)) {
+  template <- set_n(template, box, counts[[box]])
+}
 
-flow <- PRISMA_data(template)
+flow <- PRISMA_data(as.data.frame(template))
 diagram <- PRISMA_flowdiagram(flow, previous = FALSE, other = TRUE, fontsize = 12)
 PRISMA_save(diagram, filename = here("output", "prisma.svg"),
             filetype = "SVG", overwrite = TRUE)
