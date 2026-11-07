@@ -8,7 +8,10 @@ Quarto document, `report.qmd`.
 
 ## Reproduce the report
 
-1. Open `RM-LitReviewTutorial.Rproj` in RStudio (or start R in this folder).
+1. Get the project: *Code → Download ZIP* on
+   <https://github.com/graebnerc/RM-LitReviewTutorial>, or
+   `git clone https://github.com/graebnerc/RM-LitReviewTutorial.git`.
+   Open `RM-LitReviewTutorial.Rproj` in RStudio (or start R in this folder).
 2. Install the package versions used here: `renv::restore()`.
 3. Render the report: `quarto render report.qmd`, or the *Render* button.
 
