@@ -12,7 +12,9 @@ format:
     toc-depth: 2
     number-sections: false
     embed-resources: true
-    df-print: kable
+    fig-width: 7
+    fig-height: 4
+    fig-dpi: 150
 execute:
   echo: true
   warning: false
@@ -23,9 +25,9 @@ execute:
 ## How this project works
 Every search result this report uses is stored in the folder `data/`. The
 **first** render sends the searches to OpenAlex, Crossref, EconBiz and EconStor
-and saves each answer there. This will already been done once you look at this 
+and saves each answer there. This will already been done once you look at this
 file. **Every later render reads the saved answers** and
-sends no request at all -- and that includes *you* first run. 
+sends no request at all -- and that includes *you* first run.
 That makes the report reproducible: you get exactly the
 numbers in this report, even though the databases keep changing — and you need
 no API key to reproduce it.
@@ -55,6 +57,7 @@ library(readr)
 library(purrr)
 library(stringr)
 library(ggplot2)
+library(flextable)
 library(httr2)
 library(xml2)
 
@@ -65,7 +68,39 @@ options(openalexR.apikey = Sys.getenv("OPENALEX_KEY"))
 
 dir.create(here("data"), showWarnings = FALSE)
 dir.create(here("output"), showWarnings = FALSE)
-theme_set(theme_minimal())
+```
+
+Two helpers give all tables and figures the same look: `nice_table()` turns a
+data frame into a formatted table, `theme_review()` is the ggplot2 theme.
+
+```{r}
+#| label: style
+euf_blue <- "#00395B"
+euf_grey <- "#6F6F6F"
+
+set_flextable_defaults(font.size = 10, padding = 4, big.mark = ",")
+
+nice_table <- function(df) {
+  ft <- df |>
+    flextable() |>
+    theme_booktabs() |>
+    bold(part = "header") |>
+    color(color = euf_blue, part = "header")
+  years <- intersect(names(df), "Year") # years without a thousands separator
+  if (length(years)) ft <- colformat_int(ft, j = years, big.mark = "")
+  autofit(ft)
+}
+
+theme_review <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.minor    = element_blank(),
+      panel.grid.major.x  = element_blank(),
+      axis.title          = element_text(colour = euf_grey),
+      plot.title.position = "plot"
+    )
+}
+theme_set(theme_review())
 ```
 
 The helper `cached()` is what makes the report reproducible. It returns the
@@ -105,14 +140,19 @@ clean_doi <- function(x) str_to_lower(str_remove(x, "^https://doi.org/"))
 short_id  <- function(x) str_remove(x, ".*/")
 ```
 
-```{r}
-#| label: retrieval-dates
-log_file <- here("data", "retrieval_log.csv")
-if (file.exists(log_file)) read_csv(log_file, col_types = cols(.default = col_character()))
-```
+@tbl-retrieval shows when each saved answer was retrieved. These are the
+dates to report for the searches.
 
-The table shows when each saved answer was retrieved. These are the dates to
-report for the searches.
+```{r}
+#| label: tbl-retrieval
+#| tbl-cap: "When each saved search result was retrieved."
+log_file <- here("data", "retrieval_log.csv")
+if (file.exists(log_file)) {
+  read_csv(log_file, col_types = cols(.default = col_character())) |>
+    rename(`Saved result` = object, Retrieved = retrieved, Rows = rows) |>
+    nice_table()
+}
+```
 
 # Step 3: the search in OpenAlex
 
@@ -163,14 +203,16 @@ works <- cached("openalex_works", needs_key = TRUE, oa_fetch(
   type = c("article", "review"),
   language = "en"
 ))
-nrow(works)
 ```
+
+The search returns `r nrow(works)` articles and reviews in English.
 
 ## The test set
 
-Four papers that a good search should find. Two are closed-access articles
-from Elsevier journals, for which OpenAlex has no abstract — exactly the
-records that a title-and-abstract search can only find through their titles.
+Four papers that a good search should find (@tbl-test-set). Two are
+closed-access articles from Elsevier journals, for which OpenAlex has no
+abstract — exactly the records that a title-and-abstract search can only find
+through their titles.
 
 ```{r}
 #| label: test-set
@@ -185,23 +227,45 @@ test_set <- tibble(
           "10.1037/h0035419")
 )
 
-# The test-set records themselves: do they have an abstract in OpenAlex?
+# The test-set records themselves: titles, and do they have an abstract?
 test_records <- cached("openalex_test_set", needs_key = TRUE,
-                       oa_fetch(entity = "works", doi = test_set$doi))
-with_abstract <- test_records |>
-  filter(!is.na(abstract), abstract != "") |>
-  pull(doi) |>
-  clean_doi()
+                       oa_fetch(entity = "works", doi = test_set$doi)) |>
+  mutate(doi = clean_doi(doi))
 
 test_set <- test_set |>
+  left_join(test_records |> select(doi, title, abstract), by = "doi") |>
   mutate(found_by_string = doi %in% clean_doi(works$doi),
-         has_abstract    = doi %in% with_abstract)
-test_set
+         has_abstract    = !is.na(abstract) & abstract != "") |>
+  select(-abstract)
 ```
 
-For every paper the string misses, look at its title: which words would a
-title-only match have needed? Add them to the string, or rely on snowballing
-(step 6) to find papers like it — and note the decision in the search log.
+```{r}
+#| label: tbl-test-set
+#| tbl-cap: "The test set: is each paper found by the string, and does OpenAlex have its abstract?"
+test_set |>
+  transmute(Paper = paper, Title = title,
+            `Abstract in OpenAlex` = if_else(has_abstract, "yes", "no"),
+            `Found by the string` = if_else(found_by_string, "yes", "no")) |>
+  nice_table() |>
+  width(j = "Title", width = 3)
+```
+
+The string finds `r sum(test_set$found_by_string)` of the
+`r nrow(test_set)` test papers. The pattern is the one the lecture predicts:
+
+- Both papers **with an abstract** in OpenAlex are found.
+- Of the papers **without an abstract**, only titles can match, so they are
+  found only if their title contains a term from *both* concepts. Lepinteur's
+  title ("The shorter workweek and worker wellbeing") does. Raposo & van
+  Ours ("How working time reduction affects jobs and wages") names the
+  intervention but not an outcome from our list; Nord & Costigan ("Worker
+  adjustment to the four-day week") names the intervention, but "adjustment"
+  is not in the outcome block either.
+
+Two responses are possible, and both are legitimate if documented. Widen the
+outcome block (e.g. with *employment*, *wages*, *adjustment*) — at the cost of
+precision — or accept the miss and rely on snowballing (step 6) to find papers
+like these. Whatever you choose goes into the search log.
 
 ## The abstract gap
 
@@ -212,31 +276,71 @@ How many of the hits have no abstract — and where are they concentrated?
 works <- works |>
   mutate(no_abstract = is.na(abstract) | abstract == "")
 
-works |>
-  summarise(records = n(), without_abstract = sum(no_abstract),
-            share = round(mean(no_abstract), 2))
+gap <- works |>
+  summarise(records = n(), without = sum(no_abstract), share = mean(no_abstract))
 
-works |>
-  group_by(host_organization_name) |>
-  summarise(records = n(), share_no_abstract = round(mean(no_abstract), 2)) |>
-  arrange(desc(records)) |>
-  head(10)
+gap_publisher <- works |>
+  mutate(publisher = coalesce(host_organization_name, "(no publisher recorded)")) |>
+  group_by(publisher) |>
+  summarise(records = n(), without = sum(no_abstract)) |>
+  arrange(desc(records))
+
+gap_big_two <- gap_publisher |>
+  filter(str_detect(publisher, "Elsevier|Springer")) |>
+  summarise(without = sum(without)) |>
+  pull(without)
 ```
+
+Of the `r gap$records` records, `r gap$without`
+(`r scales::percent(gap$share)`) have no abstract in OpenAlex.
+@tbl-gap-publisher shows where they come from.
 
 ```{r}
-#| label: fig-abstract-gap
-#| fig-cap: "Share of hits without abstract, by publication year."
-works |>
-  group_by(publication_year) |>
-  summarise(share = mean(no_abstract)) |>
-  ggplot(aes(x = publication_year, y = share)) +
-  geom_col() +
-  labs(x = "Publication year", y = "Share of records without abstract")
+#| label: tbl-gap-publisher
+#| tbl-cap: "Records and records without abstract, for the ten publishers with the most records."
+gap_publisher |>
+  head(10) |>
+  mutate(share = scales::percent(without / records, accuracy = 1)) |>
+  rename(Publisher = publisher, Records = records,
+         `Without abstract` = without, Share = share) |>
+  nice_table()
 ```
 
-Because only titles can match for records without an abstract, these records
-are under-represented in the hits — the true gap in the literature is larger.
-These numbers belong in the limitations paragraph.
+Two things in @tbl-gap-publisher need a comment:
+
+- **The largest group has no publisher at all.** This is not an error in the
+  code. OpenAlex knows a publisher only for sources it has matched to one;
+  small, regional or new journals, repositories and records without any source
+  have none. Note that this group hardly ever lacks an abstract: these are
+  mostly open outlets that pass their abstracts on to OpenAlex.
+- **The gap sits with two publishers.** Elsevier and Springer Nature account
+  for `r gap_big_two` of the `r gap$without` records without abstract — the
+  abstract takedowns discussed in the lecture.
+
+```{r}
+#| label: fig-gap-period
+#| fig-cap: "Share of hits without an abstract in OpenAlex, by publication period. Numbers above the bars: share and number of records."
+gap_period <- works |>
+  mutate(period = cut(publication_year, c(-Inf, 1999, 2009, 2019, Inf),
+                      labels = c("before 2000", "2000–2009", "2010–2019", "since 2020"))) |>
+  group_by(period) |>
+  summarise(records = n(), share = mean(no_abstract))
+
+ggplot(gap_period, aes(x = period, y = share)) +
+  geom_col(fill = euf_blue, width = 0.6) +
+  geom_text(aes(label = str_c(scales::percent(share, accuracy = 1),
+                              "\n(n = ", records, ")")),
+            vjust = -0.3, size = 3.5, colour = euf_grey) +
+  scale_y_continuous(labels = scales::label_percent(),
+                     expand = expansion(mult = c(0, 0.25))) +
+  labs(x = NULL, y = "Records without abstract")
+```
+
+@fig-gap-period shows that the gap is smallest for the most recent records,
+which are more often open access. Keep in mind that all these shares
+*understate* the problem: a record without an abstract can only be found
+through its title, so such records are under-represented among the hits to
+begin with. These numbers belong in the limitations paragraph.
 
 ## The result set
 
@@ -246,17 +350,42 @@ These numbers belong in the limitations paragraph.
 works |>
   count(publication_year) |>
   ggplot(aes(x = publication_year, y = n)) +
-  geom_col() +
+  geom_col(fill = euf_blue, width = 0.8) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
   labs(x = "Publication year", y = "Records")
 ```
 
+Most hits are recent (@fig-years): `r sum(works$publication_year >= 2020)` of
+`r nrow(works)` are from 2020 or later, reflecting both the recent debate on
+the four-day week and the general growth of publishing.
+
 ```{r}
-#| label: journals
-works |> count(source_display_name, sort = TRUE) |> head(15)
+#| label: tbl-sources
+#| tbl-cap: "The ten most frequent sources of the hits."
+works |>
+  mutate(source = coalesce(source_display_name, "(no source recorded)")) |>
+  count(source, sort = TRUE) |>
+  head(10) |>
+  rename(Source = source, Records = n) |>
+  nice_table()
 ```
 
-If almost everything comes from a handful of journals of one field, the string
-may be speaking only one community's language.
+@tbl-sources needs a careful reading:
+
+- **No source recorded** is again a gap in the metadata, not in the code: for
+  these records OpenAlex knows a title and a year, but not where the work
+  appeared.
+- **Zenodo is not a journal** but a repository where anyone can upload
+  documents. OpenAlex treats repositories, preprint servers and PubMed as
+  "sources", and it classifies many uploads as articles — so the filter
+  `type = "article"` does not guarantee a peer-reviewed journal article. That
+  is a screening decision, and it belongs in your criteria.
+- **The hits are scattered**: the `r nrow(works)` records come from
+  `r n_distinct(works$source_display_name, na.rm = TRUE)` different sources,
+  and no source contributes more than a handful. Some come from medicine
+  (rheumatology, health economics), where "productivity" means the work
+  productivity lost to an illness — a first sign that the outcome block costs
+  precision.
 
 ## Two strings, two vocabularies
 
@@ -278,13 +407,43 @@ works_a <- cached("openalex_string_a", needs_key = TRUE, oa_fetch(
 ))
 
 only_full <- setdiff(works$id, works_a$id)
-c(string_a = nrow(works_a), full_string = nrow(works), only_full = length(only_full))
+only_a    <- setdiff(works_a$id, works$id)
+```
 
+```{r}
+#| label: tbl-strings
+#| tbl-cap: "Hits of the two strings."
+tibble(
+  `String A: four-day week terms only` = nrow(works_a),
+  `Full string` = nrow(works),
+  `Only the full string` = length(only_full),
+  `Only string A` = length(only_a)
+) |>
+  nice_table()
+```
+
+The "four-day week" vocabulary alone finds only a small fraction of the
+records (@tbl-strings). Most of the literature speaks of *working time
+reduction* or *reduced working hours* — a review built on the popular term
+would have missed most of it. @tbl-only-full shows a sample of what only the
+full string finds.
+
+```{r}
+#| label: tbl-only-full
+#| tbl-cap: "The five most-cited records that only the full string finds."
 works |>
   filter(id %in% only_full) |>
-  select(publication_year, source_display_name, title) |>
-  head(15)
+  slice_max(cited_by_count, n = 5, with_ties = FALSE) |>
+  transmute(Year = publication_year, Title = title,
+            Source = coalesce(source_display_name, "(none)")) |>
+  nice_table() |>
+  width(j = "Title", width = 3.5)
 ```
+
+A handful of records appear only under string A, although the full string
+contains all its terms. They are off-topic, and the reason lies in the search
+engine rather than in the logic of the strings — a reminder to look at such
+cases by hand instead of trusting Boolean logic blindly.
 
 # Step 5: the screening sheet
 
@@ -338,11 +497,23 @@ screening <- screening |>
     abstract = coalesce(crossref, abstract)
   ) |>
   select(-doi_clean, -crossref)
-
-screening |>
-  count(abstract_source = if_else(abstract_source == "", "(still missing)",
-                                  abstract_source))
 ```
+
+```{r}
+#| label: tbl-abstract-sources
+#| tbl-cap: "Where the abstracts in the screening sheet come from."
+screening |>
+  count(Source = if_else(abstract_source == "", "still missing", abstract_source)) |>
+  rename(Records = n) |>
+  nice_table()
+```
+
+Crossref fills in `r sum(!is.na(crossref$crossref))` of the
+`r nrow(crossref)` missing abstracts (@tbl-abstract-sources). That is not a
+failure of the code: the records without abstract are almost all from
+Elsevier and Springer Nature, and these publishers deposit no abstracts with
+Crossref either. For them, the only route is the publisher's page — by hand,
+recording "publisher page" in `abstract_source`.
 
 ```{r}
 #| label: write-sheet
@@ -355,36 +526,140 @@ screening |>
 
 The decisions are made by hand: copy the sheet, screen, and save the decisions
 as `data/screening_decisions.csv` (columns `id`, `decision_ta`, `reason_ta`,
-`decision_ft`, `reason_ft`). The flow diagram below is drawn from that file.
+`decision_ft`, `reason_ft`). The flow diagram in step 8 is drawn from that
+file.
 
 # Step 6: snowballing
 
-The seeds here are the two most-cited hits — a simple, reproducible rule for
-this demonstration. In a real review, choose two or three *included* papers
-that fit your question best, ideally one from a closed-access journal.
+Snowballing collects, for a few seed papers, the papers they cite (backward)
+and the papers that cite them (forward). Which seeds you choose decides what
+you get — as the two runs below show.
+
+## First run: seeds chosen by citation count
+
+A tempting shortcut is to take the most-cited hits as seeds:
 
 ```{r}
-#| label: snowball
-seed_works <- works |> slice_max(cited_by_count, n = 2, with_ties = FALSE)
-seed_works |> select(publication_year, title, cited_by_count)
-seeds <- short_id(seed_works$id)
+#| label: snowball-cited
+seeds_cited <- works |> slice_max(cited_by_count, n = 2, with_ties = FALSE)
 
-snow <- cached("openalex_snowball", needs_key = TRUE,
-               oa_snowball(identifier = seeds))
-candidates <- snow$nodes |> filter(!oa_input)
-new <- candidates |> filter(!short_id(id) %in% short_id(works$id))
-c(candidates = nrow(candidates), new = nrow(new))
+snow_cited <- cached("openalex_snowball", needs_key = TRUE,
+                     oa_snowball(identifier = short_id(seeds_cited$id)))
+
+# Links from a seed point backward (to its references), links to a seed
+# point forward (from papers citing it)
+links_cited <- snow_cited$edges |>
+  mutate(direction = if_else(from %in% short_id(seeds_cited$id),
+                             "backward", "forward")) |>
+  count(direction)
+
+new_cited <- snow_cited$nodes |>
+  filter(!oa_input, !short_id(id) %in% short_id(works$id))
 ```
 
-The new records are screened with the same criteria and counted separately in
-the flow diagram. Does snowballing find test-set papers that the string missed?
+```{r}
+#| label: tbl-seeds-cited
+#| tbl-cap: "Seeds chosen by citation count: the two most-cited hits."
+seeds_cited |>
+  transmute(Year = publication_year, Title = title, Citations = cited_by_count) |>
+  nice_table() |>
+  width(j = "Title", width = 4)
+```
+
+The result is a lesson in itself. The most-cited hit (@tbl-seeds-cited) is
+about the economic burden of dementia: it matched the string through generic
+words such as "productivity", and it is cited mainly by medical research.
+Snowballing from it returns `r nrow(new_cited)` new records — most of them
+forward citations
+(`r links_cited |> filter(direction == "forward") |> pull(n)` forward against
+`r links_cited |> filter(direction == "backward") |> pull(n)` backward links) —
+and almost none of them on working time. Most cited is not most relevant:
+seeds must be *included* papers, chosen for their fit with the question.
+
+## Second run: seeds chosen for their fit
+
+The second run uses the two test-set papers that the string found and that
+fit the question best:
 
 ```{r}
-#| label: snowball-test-set
+#| label: snowball-fit
+seeds_fit <- works |>
+  filter(clean_doi(doi) %in% test_set$doi[test_set$found_by_string])
+
+snow_fit <- cached("openalex_snowball_fit", needs_key = TRUE,
+                   oa_snowball(identifier = short_id(seeds_fit$id)))
+
+candidates_fit <- snow_fit$nodes |> filter(!oa_input)
+new_fit <- candidates_fit |>
+  filter(!short_id(id) %in% short_id(works$id))
+```
+
+Even from good seeds, snowballing returns more records than one would want to
+screen by hand. A documented, reproducible way to narrow them down is a
+**title filter**: keep only the new records whose title mentions working time
+at all. It is a coarse screening step — and, like every screening step, it is
+reported: in the flow diagram, the filtered-out records are the difference
+between the records identified and the reports sought in the snowballing arm.
+
+```{r}
+#| label: title-filter
+time_terms <- regex(
+  "four[- ]day|4[- ]day|working[- ]time|work[- ]time|working hours|work hours|hours of work|workweek|work week|working week",
+  ignore_case = TRUE
+)
+new_fit_filtered <- new_fit |>
+  filter(str_detect(coalesce(title, ""), time_terms))
+
+# Sheet for screening the snowballed records by hand
+new_fit_filtered |>
+  transmute(id, doi, publication_year, title, source_display_name, abstract,
+            decision_ft = "", reason_ft = "", notes = "") |>
+  write_excel_csv(here("output", "snowball_sheet.csv"))
+```
+
+```{r}
+#| label: tbl-snowball
+#| tbl-cap: "The two snowballing runs compared."
+tibble(
+  Run = c("Seeds by citation count", "Seeds chosen for fit"),
+  `Records linked to the seeds` = c(nrow(snow_cited$nodes |> filter(!oa_input)),
+                                    nrow(candidates_fit)),
+  `New (not found by the string)` = c(nrow(new_cited), nrow(new_fit)),
+  `New, after the title filter` = c(
+    sum(str_detect(coalesce(new_cited$title, ""), time_terms)),
+    nrow(new_fit_filtered)),
+  `Test papers found` = c(
+    sum(test_set$doi %in% clean_doi(snow_cited$nodes$doi)),
+    sum(test_set$doi %in% clean_doi(snow_fit$nodes$doi)))
+) |>
+  nice_table()
+```
+
+@tbl-snowball compares the two runs. With well-chosen seeds, snowballing
+does what it is for: it reaches papers that the string missed. Lepinteur's
+reference list, for instance, contains Raposo & van Ours — one of the two
+test papers the string could not find, because OpenAlex has no abstract for
+it. @tbl-snowball-test shows which test papers each route finds.
+
+```{r}
+#| label: tbl-snowball-test
+#| tbl-cap: "Which route finds which test paper?"
 test_set |>
-  mutate(found_by_snowball = doi %in% clean_doi(candidates$doi)) |>
-  select(paper, found_by_string, found_by_snowball)
+  transmute(
+    Paper = paper,
+    `String` = if_else(found_by_string, "yes", "no"),
+    `Snowballing (seeds by citations)` =
+      if_else(doi %in% clean_doi(snow_cited$nodes$doi), "yes", "no"),
+    `Snowballing (seeds by fit)` =
+      if_else(doi %in% clean_doi(snow_fit$nodes$doi), "yes", "no")
+  ) |>
+  nice_table()
 ```
+
+The new records that pass the title filter are written to
+`output/snowball_sheet.csv` and screened by hand with the same criteria; the
+decisions go into `data/snowball_decisions.csv` (columns `id`, `decision_ft`,
+`reason_ft`).
 
 # Digression: a second database — EconBiz
 
@@ -444,7 +719,6 @@ econbiz_search <- function(q, page_size = 500) {
 }
 
 eb_raw <- cached("econbiz_en", econbiz_search(eb_query))
-nrow(eb_raw)
 ```
 
 Drop events, then duplicates within EconBiz — first by DOI, then by title and
@@ -457,9 +731,23 @@ eb <- eb_raw |>
   mutate(title_key = str_to_lower(str_remove_all(title, "[^[:alnum:]]"))) |>
   filter(is.na(doi) | !duplicated(doi)) |>
   distinct(title_key, year, .keep_all = TRUE)
-nrow(eb)
-eb |> count(source, type, sort = TRUE)
 ```
+
+Of the `r nrow(eb_raw)` EconBiz records, `r nrow(eb)` remain after removing
+events and duplicates. @tbl-econbiz-sources shows where they come from.
+
+```{r}
+#| label: tbl-econbiz-sources
+#| tbl-cap: "EconBiz records after cleaning, by source and type of publication."
+eb |>
+  count(source, type, sort = TRUE) |>
+  rename(Source = source, Type = type, Records = n) |>
+  nice_table()
+```
+
+EconBiz is strong where OpenAlex is weak: books from the ZBW catalogue
+(ECONIS), working papers (RePEc, EconStor) and reports — the kind of
+literature that a database of journal articles under-represents.
 
 Abstracts for records in EconStor, via its OAI-PMH interface:
 
@@ -485,24 +773,35 @@ econstor <- cached("econstor_abstracts", tibble(
 ))
 
 eb <- eb |> left_join(econstor, by = "handle")
-eb |> summarise(records = n(), with_abstract = sum(!is.na(abstract)))
 ```
 
-Compared with OpenAlex, by DOI — records without a DOI are counted
-separately:
+EconStor provides abstracts for `r sum(!is.na(eb$abstract))` of the
+`r nrow(eb)` records; for the others, the DOI or the catalogue entry leads to
+the abstract.
 
 ```{r}
 #| label: econbiz-compare
 oa_dois <- works |> filter(!is.na(doi)) |> pull(doi) |> clean_doi() |> unique()
 eb_dois <- eb |> filter(!is.na(doi)) |> pull(doi) |> unique()
-
-c(only_openalex       = length(setdiff(oa_dois, eb_dois)),
-  only_econbiz        = length(setdiff(eb_dois, oa_dois)),
-  both                = length(intersect(oa_dois, eb_dois)),
-  econbiz_without_doi = sum(is.na(eb$doi)))
-
-eb |> filter(!doi %in% oa_dois) |> count(type, source, sort = TRUE)
 ```
+
+```{r}
+#| label: tbl-econbiz-compare
+#| tbl-cap: "OpenAlex and EconBiz compared by DOI."
+tibble(
+  `Only OpenAlex` = length(setdiff(oa_dois, eb_dois)),
+  `Only EconBiz` = length(setdiff(eb_dois, oa_dois)),
+  Both = length(intersect(oa_dois, eb_dois)),
+  `EconBiz without DOI` = sum(is.na(eb$doi))
+) |>
+  nice_table()
+```
+
+The overlap is small (@tbl-econbiz-compare), but read it with care: fewer
+than half of the EconBiz records have a DOI at all, and books and working
+papers rarely do. A comparison by DOI therefore understates the overlap — and
+the EconBiz records without DOI are exactly the books and working papers that
+OpenAlex is weakest on.
 
 The German-language literature, which the English-only OpenAlex search
 excludes:
@@ -511,87 +810,97 @@ excludes:
 #| label: econbiz-german
 de_terms <- 'Arbeitszeitverkürzung OR "Vier-Tage-Woche" OR "4-Tage-Woche"'
 eb_de <- cached("econbiz_de", econbiz_search(in_fields(de_terms)))
-nrow(eb_de)
-eb_de |> select(year, title) |> head(10)
 ```
+
+The German search finds `r nrow(eb_de)` records in EconBiz — more than the
+English OpenAlex search finds in total. Restricting a review to English is a
+legitimate choice, but on this topic it is a consequential one, and it belongs
+in the limitations.
 
 # Step 8: the flow diagram
 
-The diagram needs the screening decisions, which are made by hand and saved
-as `data/screening_decisions.csv`.
+The flow diagram (@fig-prisma) needs the screening decisions, which are made
+by hand and saved as `data/screening_decisions.csv` and
+`data/snowball_decisions.csv`. Until they exist, the figure shows a
+placeholder.
 
 ```{r}
-#| label: decisions
+#| label: prisma-data
 decisions_file <- here("data", "screening_decisions.csv")
-has_decisions <- file.exists(decisions_file)
-if (!has_decisions) {
-  cat("No screening decisions yet (data/screening_decisions.csv is missing):",
-      "the flow diagram is drawn once they exist.\n")
+snowball_file  <- here("data", "snowball_decisions.csv")
+has_decisions  <- file.exists(decisions_file) && file.exists(snowball_file)
+prisma_file    <- here("output", "prisma.svg")
+
+if (has_decisions) {
+  library(PRISMA2020)
+  read_decisions <- function(f) read_csv(f, col_types = cols(.default = col_character()))
+
+  screened <- read_decisions(decisions_file) |> filter(id %in% works$id)
+  snowball <- read_decisions(snowball_file) |> filter(id %in% new_fit_filtered$id)
+
+  template <- read_csv(system.file("extdata", "PRISMA.csv", package = "PRISMA2020"),
+                       col_types = cols(.default = col_character()))
+  set_n <- function(tab, field, value) {
+    if (!field %in% tab$data) stop("Unknown box in PRISMA template: ", field)
+    tab |> mutate(n = if_else(data == field, as.character(value), n))
+  }
+  reasons_text <- function(d) {
+    r <- d |> filter(decision_ft == "exclude") |> count(reason_ft)
+    str_c(r$reason_ft, ", ", r$n, collapse = "; ")
+  }
+
+  sought        <- screened |> filter(decision_ta != "exclude") |> nrow()
+  not_retrieved <- screened |> filter(decision_ft == "not retrievable") |> nrow()
+  included_db   <- screened |> filter(decision_ft == "include") |> nrow()
+  included_snow <- snowball |> filter(decision_ft == "include") |> nrow()
+
+  counts <- list(
+    database_results           = nrow(works),
+    duplicates                 = 0,
+    records_screened           = nrow(screened),
+    records_excluded           = screened |> filter(decision_ta == "exclude") |> nrow(),
+    dbr_sought_reports         = sought,
+    dbr_notretrieved_reports   = not_retrieved,
+    dbr_assessed               = sought - not_retrieved,
+    dbr_excluded               = reasons_text(screened),
+    citations_results          = nrow(new_fit),
+    other_sought_reports       = nrow(new_fit_filtered),
+    other_notretrieved_reports = snowball |> filter(decision_ft == "not retrievable") |> nrow(),
+    other_assessed             = snowball |> filter(decision_ft != "not retrievable") |> nrow(),
+    other_excluded             = reasons_text(snowball),
+    new_studies                = included_db + included_snow,
+    new_reports                = included_db + included_snow
+  )
+  for (box in names(counts)) {
+    template <- set_n(template, box, counts[[box]])
+  }
+
+  flow <- PRISMA_data(as.data.frame(template))
+  diagram <- PRISMA_flowdiagram(flow, previous = FALSE, other = TRUE, fontsize = 12)
+  PRISMA_save(diagram, filename = prisma_file, filetype = "SVG", overwrite = TRUE)
+  PRISMA_save(diagram, filename = here("output", "prisma.png"),
+              filetype = "PNG", overwrite = TRUE)
 }
 ```
 
 ```{r}
-#| label: prisma
-#| eval: !expr has_decisions
-library(PRISMA2020)
-
-screened <- read_csv(decisions_file, col_types = cols(.default = col_character())) |>
-  filter(id %in% works$id)
-
-template <- read_csv(system.file("extdata", "PRISMA.csv", package = "PRISMA2020"),
-                     col_types = cols(.default = col_character()))
-set_n <- function(tab, field, value) {
-  if (!field %in% tab$data) stop("Unknown box in PRISMA template: ", field)
-  tab |> mutate(n = if_else(data == field, as.character(value), n))
+#| label: fig-prisma
+#| fig-cap: "PRISMA 2020 flow diagram of the example review. The arm on the right counts the records found by snowballing from the two seeds chosen for fit; of those, only the records that passed the title filter were sought for retrieval."
+#| fig-height: 6
+#| out-width: "100%"
+if (has_decisions) {
+  knitr::include_graphics(prisma_file)
+} else {
+  ggplot() +
+    annotate("text", x = 0, y = 0, size = 5, colour = euf_grey,
+             label = str_c("The flow diagram appears here once the screening decisions exist:\n",
+                           "data/screening_decisions.csv and data/snowball_decisions.csv")) +
+    theme_void()
 }
-
-sought        <- screened |> filter(decision_ta != "exclude") |> nrow()
-not_retrieved <- screened |> filter(decision_ft == "not retrievable") |> nrow()
-reasons       <- screened |> filter(decision_ft == "exclude") |> count(reason_ft)
-included_db   <- screened |> filter(decision_ft == "include") |> nrow()
-
-# Snowballing: the new records are screened by hand as well; their decisions
-# go into data/snowball_decisions.csv (same columns)
-snowball_found    <- nrow(new)
-snowball_included <- 0L
-snow_file <- here("data", "snowball_decisions.csv")
-if (file.exists(snow_file)) {
-  snowball_included <- read_csv(snow_file, col_types = cols(.default = col_character())) |>
-    filter(decision_ft == "include") |>
-    nrow()
-}
-
-counts <- list(
-  database_results           = nrow(works),
-  duplicates                 = 0,
-  records_screened           = nrow(screened),
-  records_excluded           = screened |> filter(decision_ta == "exclude") |> nrow(),
-  dbr_sought_reports         = sought,
-  dbr_notretrieved_reports   = not_retrieved,
-  dbr_assessed               = sought - not_retrieved,
-  dbr_excluded               = str_c(reasons$reason_ft, ", ", reasons$n,
-                                     collapse = "; "),
-  citations_results          = snowball_found,
-  other_sought_reports       = snowball_found,
-  other_notretrieved_reports = 0,
-  other_assessed             = snowball_found,
-  other_excluded             = str_c("Not eligible, ",
-                                     snowball_found - snowball_included),
-  new_studies                = included_db + snowball_included,
-  new_reports                = included_db + snowball_included
-)
-for (box in names(counts)) {
-  template <- set_n(template, box, counts[[box]])
-}
-
-flow <- PRISMA_data(as.data.frame(template))
-diagram <- PRISMA_flowdiagram(flow, previous = FALSE, other = TRUE, fontsize = 12)
-PRISMA_save(diagram, filename = here("output", "prisma.svg"),
-            filetype = "SVG", overwrite = TRUE)
-PRISMA_save(diagram, filename = here("output", "prisma.png"),
-            filetype = "PNG", overwrite = TRUE)
-diagram
 ```
+
+`other = TRUE` draws the right-hand arm for snowballing; `previous = FALSE`
+hides the arm for earlier versions of a review, which this one does not have.
 
 # Reproducibility
 
