@@ -524,10 +524,10 @@ screening |>
   write_excel_csv(here("output", "screening_sheet.csv"))
 ```
 
-The decisions are made by hand: copy the sheet, screen, and save the decisions
-as `data/screening_decisions.csv` (columns `id`, `decision_ta`, `reason_ta`,
-`decision_ft`, `reason_ft`). The flow diagram in step 8 is drawn from that
-file.
+The decisions are recorded in `data/screening_decisions.csv` (columns `id`,
+`decision_ta`, `reason_ta`, `decision_ft`, `reason_ft`, `screener`, `notes`);
+the section "Screening the records" below reports them, and the flow diagram
+in step 8 is drawn from them.
 
 # Step 6: snowballing
 
@@ -657,9 +657,127 @@ test_set |>
 ```
 
 The new records that pass the title filter are written to
-`output/snowball_sheet.csv` and screened by hand with the same criteria; the
-decisions go into `data/snowball_decisions.csv` (columns `id`, `decision_ft`,
-`reason_ft`).
+`output/snowball_sheet.csv` and screened with the same criteria; the
+decisions are in `data/snowball_decisions.csv`.
+
+# Screening the records
+
+::: {.callout-warning}
+## Disclosure about screening
+The decisions in `data/screening_decisions.csv` and
+`data/snowball_decisions.csv` were made by an **AI assistant (Claude)**, as a
+demonstration for this tutorial, and have **not been checked by myself**.
+In a real review this would have to be disclosed exactly like this, and a
+person would have to check at least a sample of the decisions — the lecture
+explains why. Two further limitations follow from it:
+
+- The second round is based on the **abstracts**, read against the criteria
+  more strictly than in round 1; the full texts were not consulted.
+- Where neither title nor abstract allowed a decision, the record counts as
+  **not retrievable**.
+- I did this because I currently do not have the ressources to complete the 
+  screening myself, and this is a tutorial for illustration. Do not do it like
+  this in situations that matter more, such as an exam or a thesis.
+:::
+
+The criteria are those of the tutorial (step 1):
+
+- **Include:** empirical studies, quantitative or qualitative, of an *actual*
+  reduction in working time — at firm, sector or country level — that report
+  at least one outcome for employees or firms.
+- **Exclude:** conceptual and normative papers, models and simulations;
+  reviews; compressed work weeks (the same hours in fewer days), preferences
+  for a hypothetical reduction, cross-sectional comparisons of hours and
+  individually chosen part-time work; studies without an outcome for
+  employees or firms; papers not in English.
+
+Round 1 (titles and abstracts) excluded what was clearly out; round 2 applied
+the criteria strictly and records one reason from a fixed list for every
+exclusion.
+
+```{r}
+#| label: decisions
+read_decisions <- function(f) read_csv(f, col_types = cols(.default = col_character()))
+
+screened <- read_decisions(here("data", "screening_decisions.csv")) |>
+  filter(id %in% works$id)
+snowball <- read_decisions(here("data", "snowball_decisions.csv")) |>
+  filter(id %in% new_fit_filtered$id)
+
+# Empty cells are read as NA: filter() drops them, so these ID lists are clean
+included_db_ids   <- screened |> filter(decision_ft == "include") |> pull(id)
+included_snow_ids <- snowball |> filter(decision_ft == "include") |> pull(id)
+
+n_dup      <- screened |> filter(reason_ta == "Duplicate") |> nrow()
+n_kept     <- sum(screened$decision_ta == "include")
+n_included <- length(included_db_ids)
+```
+
+```{r}
+#| label: tbl-round1
+#| tbl-cap: "Round 1 (titles and abstracts) of the database records."
+screened |>
+  mutate(Decision = if_else(decision_ta == "include", "kept for round 2",
+                            str_c("excluded: ", reason_ta))) |>
+  count(Decision, sort = TRUE) |>
+  rename(Records = n) |>
+  nice_table()
+```
+
+Of the `r nrow(screened)` records, `r n_dup` are duplicates, and only
+`r n_kept` survive round 1 (@tbl-round1). Most of the others are off-topic:
+"productivity", "performance", "stress" or "satisfaction" combined with some
+mention of working hours occur everywhere in medicine and engineering. This
+is the low precision that @tbl-sources already hinted at.
+
+```{r}
+#| label: tbl-round2
+#| tbl-cap: "Round 2: decisions and exclusion reasons, for the database records and the snowballed records."
+bind_rows(
+  screened |> filter(decision_ta == "include") |> mutate(Arm = "Database"),
+  snowball |> mutate(Arm = "Snowballing")
+) |>
+  mutate(Decision = case_when(decision_ft == "include" ~ "included",
+                              decision_ft == "not retrievable" ~ "not retrievable",
+                              TRUE ~ str_c("excluded: ", reason_ft))) |>
+  count(Arm, Decision) |>
+  pivot_wider(names_from = Arm, values_from = n, values_fill = 0) |>
+  arrange(desc(Database)) |>
+  nice_table()
+```
+
+The most frequent exclusion reason in round 2 (@tbl-round2) is that a study
+does not look at a reduction in working time. Many studies from the 1970s
+examine a "four-day week" that was in fact a *compressed* week of four
+ten-hour days — exactly the terminology trap that step 1 of the tutorial warns
+about. Others compare people who happen to work fewer hours, or ask about
+preferences for a reduction that has not happened.
+
+```{r}
+#| label: tbl-test-included
+#| tbl-cap: "The test set after screening."
+test_set |>
+  left_join(works |> transmute(id, doi = clean_doi(doi)), by = "doi") |>
+  left_join(snow_fit$nodes |> transmute(id_snow = id, doi = clean_doi(doi)),
+            by = "doi") |>
+  mutate(
+    Route = case_when(found_by_string ~ "string",
+                      !is.na(id_snow) ~ "snowballing",
+                      TRUE ~ "not found"),
+    Included = case_when(
+      !is.na(id) & id %in% included_db_ids ~ "yes",
+      !is.na(id_snow) & short_id(id_snow) %in% short_id(included_snow_ids) ~ "yes",
+      TRUE ~ "no")
+  ) |>
+  transmute(Paper = paper, `Found by` = Route, Included) |>
+  distinct() |>
+  nice_table()
+```
+
+Three of the four test papers end up in the review (@tbl-test-included) —
+one of them only thanks to snowballing. The fourth, a 1973 study without an
+abstract whose title lacks every outcome term, is found by neither route: a
+residual gap of the kind the limitations paragraph has to name.
 
 # Digression: a second database — EconBiz
 
@@ -819,88 +937,96 @@ in the limitations.
 
 # Step 8: the flow diagram
 
-The flow diagram (@fig-prisma) needs the screening decisions, which are made
-by hand and saved as `data/screening_decisions.csv` and
-`data/snowball_decisions.csv`. Until they exist, the figure shows a
-placeholder.
-
 ```{r}
 #| label: prisma-data
-decisions_file <- here("data", "screening_decisions.csv")
-snowball_file  <- here("data", "snowball_decisions.csv")
-has_decisions  <- file.exists(decisions_file) && file.exists(snowball_file)
-prisma_file    <- here("output", "prisma.svg")
+library(PRISMA2020)
 
-if (has_decisions) {
-  library(PRISMA2020)
-  read_decisions <- function(f) read_csv(f, col_types = cols(.default = col_character()))
-
-  screened <- read_decisions(decisions_file) |> filter(id %in% works$id)
-  snowball <- read_decisions(snowball_file) |> filter(id %in% new_fit_filtered$id)
-
-  template <- read_csv(system.file("extdata", "PRISMA.csv", package = "PRISMA2020"),
-                       col_types = cols(.default = col_character()))
-  set_n <- function(tab, field, value) {
-    if (!field %in% tab$data) stop("Unknown box in PRISMA template: ", field)
-    tab |> mutate(n = if_else(data == field, as.character(value), n))
-  }
-  reasons_text <- function(d) {
-    r <- d |> filter(decision_ft == "exclude") |> count(reason_ft)
-    str_c(r$reason_ft, ", ", r$n, collapse = "; ")
-  }
-
-  sought        <- screened |> filter(decision_ta != "exclude") |> nrow()
-  not_retrieved <- screened |> filter(decision_ft == "not retrievable") |> nrow()
-  included_db   <- screened |> filter(decision_ft == "include") |> nrow()
-  included_snow <- snowball |> filter(decision_ft == "include") |> nrow()
-
-  counts <- list(
-    database_results           = nrow(works),
-    duplicates                 = 0,
-    records_screened           = nrow(screened),
-    records_excluded           = screened |> filter(decision_ta == "exclude") |> nrow(),
-    dbr_sought_reports         = sought,
-    dbr_notretrieved_reports   = not_retrieved,
-    dbr_assessed               = sought - not_retrieved,
-    dbr_excluded               = reasons_text(screened),
-    citations_results          = nrow(new_fit),
-    other_sought_reports       = nrow(new_fit_filtered),
-    other_notretrieved_reports = snowball |> filter(decision_ft == "not retrievable") |> nrow(),
-    other_assessed             = snowball |> filter(decision_ft != "not retrievable") |> nrow(),
-    other_excluded             = reasons_text(snowball),
-    new_studies                = included_db + included_snow,
-    new_reports                = included_db + included_snow
-  )
-  for (box in names(counts)) {
-    template <- set_n(template, box, counts[[box]])
-  }
-
-  flow <- PRISMA_data(as.data.frame(template))
-  diagram <- PRISMA_flowdiagram(flow, previous = FALSE, other = TRUE, fontsize = 12)
-  PRISMA_save(diagram, filename = prisma_file, filetype = "SVG", overwrite = TRUE)
-  PRISMA_save(diagram, filename = here("output", "prisma.png"),
-              filetype = "PNG", overwrite = TRUE)
+template <- read_csv(system.file("extdata", "PRISMA.csv", package = "PRISMA2020"),
+                     col_types = cols(.default = col_character()))
+set_n <- function(tab, field, value) {
+  if (!field %in% tab$data) stop("Unknown box in PRISMA template: ", field)
+  tab |> mutate(n = if_else(data == field, as.character(value), n))
 }
+# PRISMA2020 expects "reason, n; reason, n" -- so the reasons themselves must
+# not contain a comma or a semicolon
+reasons_text <- function(d) {
+  r <- d |> filter(decision_ft == "exclude") |> count(reason_ft, sort = TRUE)
+  stopifnot(!any(str_detect(r$reason_ft, "[,;]")))
+  str_c(r$reason_ft, ", ", r$n, collapse = "; ")
+}
+
+sought        <- screened |> filter(decision_ta == "include") |> nrow()
+not_retrieved <- screened |> filter(decision_ft == "not retrievable") |> nrow()
+included_snow <- length(included_snow_ids)
+
+counts <- list(
+  database_results           = nrow(works),
+  duplicates                 = n_dup,
+  records_screened           = nrow(works) - n_dup,
+  records_excluded           = nrow(works) - n_dup - sought,
+  dbr_sought_reports         = sought,
+  dbr_notretrieved_reports   = not_retrieved,
+  dbr_assessed               = sought - not_retrieved,
+  dbr_excluded               = reasons_text(screened),
+  citations_results          = nrow(new_fit),
+  other_sought_reports       = nrow(new_fit_filtered),
+  other_notretrieved_reports = snowball |> filter(decision_ft == "not retrievable") |> nrow(),
+  other_assessed             = snowball |> filter(decision_ft != "not retrievable") |> nrow(),
+  other_excluded             = reasons_text(snowball),
+  new_studies                = n_included + included_snow,
+  new_reports                = n_included + included_snow
+)
+for (box in names(counts)) {
+  template <- set_n(template, box, counts[[box]])
+}
+
+flow <- PRISMA_data(as.data.frame(template))
+diagram <- PRISMA_flowdiagram(flow, previous = FALSE, other = TRUE, fontsize = 12)
+prisma_file <- here("output", "prisma.svg")
+PRISMA_save(diagram, filename = prisma_file, filetype = "SVG", overwrite = TRUE)
+PRISMA_save(diagram, filename = here("output", "prisma.png"),
+            filetype = "PNG", overwrite = TRUE)
 ```
+
+@fig-prisma summarises the fate of every record. Of the `r nrow(works)`
+records the string found, `r n_included` are included; snowballing adds
+`r included_snow` more, so that the review rests on
+`r n_included + included_snow` studies (@tbl-included).
 
 ```{r}
 #| label: fig-prisma
 #| fig-cap: "PRISMA 2020 flow diagram of the example review. The arm on the right counts the records found by snowballing from the two seeds chosen for fit; of those, only the records that passed the title filter were sought for retrieval."
 #| fig-height: 6
 #| out-width: "100%"
-if (has_decisions) {
-  knitr::include_graphics(prisma_file)
-} else {
-  ggplot() +
-    annotate("text", x = 0, y = 0, size = 5, colour = euf_grey,
-             label = str_c("The flow diagram appears here once the screening decisions exist:\n",
-                           "data/screening_decisions.csv and data/snowball_decisions.csv")) +
-    theme_void()
-}
+knitr::include_graphics(prisma_file)
 ```
 
 `other = TRUE` draws the right-hand arm for snowballing; `previous = FALSE`
 hides the arm for earlier versions of a review, which this one does not have.
+
+## The included studies
+
+```{r}
+#| label: tbl-included
+#| tbl-cap: "The included studies, by route and year."
+bind_rows(
+  works |>
+    filter(id %in% included_db_ids) |>
+    transmute(Year = publication_year, Title = title,
+              Source = coalesce(source_display_name, "(none)"), Route = "string"),
+  new_fit_filtered |>
+    filter(id %in% included_snow_ids) |>
+    transmute(Year = publication_year, Title = title,
+              Source = coalesce(source_display_name, "(none)"), Route = "snowballing")
+) |>
+  arrange(Year) |>
+  nice_table() |>
+  width(j = "Title", width = 4) |>
+  width(j = "Source", width = 1.6)
+```
+
+These are the studies that would enter the concept matrix (step 7 of the
+tutorial).
 
 # Reproducibility
 

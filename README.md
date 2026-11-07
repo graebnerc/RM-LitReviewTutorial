@@ -39,7 +39,7 @@ This sends all searches again and overwrites the saved results in `data/`.
 | `report.qmd` | All code and explanations; renders to `report.html` |
 | `data/*.rds` | Saved answers of OpenAlex, Crossref, EconBiz and EconStor |
 | `data/retrieval_log.csv` | When each saved answer was retrieved |
-| `data/screening_decisions.csv` | Screening decisions, made by hand (columns `id`, `decision_ta`, `reason_ta`, `decision_ft`, `reason_ft`) |
+| `data/screening_decisions.csv` | Screening decisions for the database records (made by an AI assistant as a demonstration, not checked by a person — see the report) |
 | `data/snowball_decisions.csv` | The same for the records found by snowballing |
 | `output/screening_sheet.csv` | Screening sheet built by the report — the starting point for the decisions |
 | `output/prisma.svg`, `.png` | The flow diagram, once screening decisions exist |
