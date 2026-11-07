@@ -1,0 +1,21 @@
+# R and RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Never commit API keys: they live in your user-level ~/.Renviron
+.Renviron
+
+# renv: the library is rebuilt from renv.lock with renv::restore()
+renv/library/
+renv/staging/
+renv/local/
+
+# Rendered report and its helper files (the saved search results in data/
+# and the tables in output/ ARE committed — they make the report reproducible)
+report.html
+report_files/
+/.quarto/
+**/*.quarto_ipynb
+.DS_Store

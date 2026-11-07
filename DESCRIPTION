@@ -1,0 +1,5 @@
+Package: RMLitReviewTutorial
+Title: Mini systematic review, lecture 8
+Version: 1.0
+Depends: R (>= 4.3)
+Imports: openalexR, PRISMA2020, DiagrammeRsvg, rsvg, httr2, xml2, jsonlite, data.table, ggplot2, here, knitr, rmarkdown
